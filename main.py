@@ -6,13 +6,309 @@ from supabase import create_client, Client
 import os
 import json
 from dotenv import load_dotenv
+import re
+import hashlib
+from typing import Dict, List, Optional, Tuple
+import requests
+import mimetypes
+import zipfile
+from io import BytesIO
+import tempfile
+import shutil
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Supabase Configuration
-SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+# API Configuration
+DEFAULT_OPENAI_MODELS = ["gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"]
+
+# Theme Configuration
+THEMES = {
+    "light": {
+        "primary": "#1f77b4",
+        "secondary": "#ff7f0e",
+        "background": "#ffffff",
+        "text": "#2c3e50",
+        "sidebar": "#f8f9fa",
+        "card": "#ffffff",
+        "border": "#e9ecef"
+    },
+    "dark": {
+        "primary": "#00d4ff",
+        "secondary": "#ff6b6b",
+        "background": "#1a1a1a",
+        "text": "#ffffff",
+        "sidebar": "#2d2d2d",
+        "card": "#333333",
+        "border": "#444444"
+    },
+    "modern": {
+        "primary": "#6366f1",
+        "secondary": "#f59e0b",
+        "background": "#0f172a",
+        "text": "#f8fafc",
+        "sidebar": "#1e293b",
+        "card": "#334155",
+        "border": "#475569"
+    }
+}
+
+def verify_openai_api_key(api_key: str) -> Tuple[bool, str]:
+    """Verify OpenAI API key by making a test request"""
+    if not api_key or not api_key.startswith('sk-'):
+        return False, "❌ Invalid API key format. OpenAI keys should start with 'sk-'"
+
+    try:
+        client = openai.OpenAI(api_key=api_key)
+        # Test with a minimal request
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": "Hello"}],
+            max_tokens=5
+        )
+        return True, "✅ OpenAI API key verified successfully!"
+    except openai.AuthenticationError:
+        return False, "❌ Invalid API key. Please check your OpenAI API key."
+    except openai.RateLimitError:
+        return False, "⚠️ Rate limit exceeded. Your API key is valid but you may have hit rate limits."
+    except Exception as e:
+        return False, f"❌ API verification failed: {str(e)}"
+
+def verify_supabase_credentials(url: str, key: str) -> Tuple[bool, str]:
+    """Verify Supabase credentials by testing connection"""
+    if not url or not url.startswith('https://'):
+        return False, "❌ Invalid Supabase URL format. Should start with 'https://'"
+
+    if not key or len(key) < 50:
+        return False, "❌ Invalid Supabase key format. Key should be longer."
+
+    try:
+        supabase = create_client(url, key)
+        # Test connection by trying to get table info
+        result = supabase.table('conversations').select('id').limit(1).execute()
+        return True, "✅ Supabase credentials verified successfully!"
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "relation" in error_msg and "does not exist" in error_msg:
+            return False, "⚠️ Supabase connection successful, but tables don't exist yet. Please create the database tables."
+        elif "invalid" in error_msg or "unauthorized" in error_msg:
+            return False, "❌ Invalid Supabase credentials. Please check your URL and key."
+        else:
+            return False, f"❌ Supabase verification failed: {str(e)}"
+
+def initialize_apis(openai_key: str = None, supabase_url: str = None, supabase_key: str = None) -> Dict[str, any]:
+    """Initialize and verify API connections"""
+    results = {
+        "openai": {"verified": False, "message": "", "client": None},
+        "supabase": {"verified": False, "message": "", "client": None}
+    }
+
+    # Verify OpenAI
+    if openai_key:
+        verified, message = verify_openai_api_key(openai_key)
+        results["openai"]["verified"] = verified
+        results["openai"]["message"] = message
+        if verified:
+            results["openai"]["client"] = openai.OpenAI(api_key=openai_key)
+
+    # Verify Supabase
+    if supabase_url and supabase_key:
+        verified, message = verify_supabase_credentials(supabase_url, supabase_key)
+        results["supabase"]["verified"] = verified
+        results["supabase"]["message"] = message
+        if verified:
+            results["supabase"]["client"] = create_client(supabase_url, supabase_key)
+
+    return results
+
+# File Analysis Functions
+def detect_language_from_file(file_path: str, content: str = None) -> str:
+    """Detect programming language from file extension and content"""
+    if not file_path:
+        return "unknown"
+
+    # Language detection by extension
+    ext_to_lang = {
+        '.py': 'python', '.js': 'javascript', '.ts': 'typescript', '.tsx': 'typescript',
+        '.jsx': 'javascript', '.java': 'java', '.cpp': 'cpp', '.c': 'c', '.cs': 'csharp',
+        '.php': 'php', '.rb': 'ruby', '.go': 'go', '.rs': 'rust', '.swift': 'swift',
+        '.kt': 'kotlin', '.scala': 'scala', '.html': 'html', '.css': 'css', '.scss': 'scss',
+        '.sass': 'sass', '.less': 'less', '.json': 'json', '.xml': 'xml', '.yaml': 'yaml',
+        '.yml': 'yaml', '.toml': 'toml', '.md': 'markdown', '.txt': 'text', '.sql': 'sql',
+        '.sh': 'bash', '.ps1': 'powershell', '.r': 'r', '.m': 'matlab', '.pl': 'perl',
+        '.lua': 'lua', '.dart': 'dart', '.vb': 'vb', '.fs': 'fsharp'
+    }
+
+    _, ext = os.path.splitext(file_path.lower())
+    if ext in ext_to_lang:
+        return ext_to_lang[ext]
+
+    # Content-based detection for files without extensions
+    if content:
+        content_lower = content.lower()
+        if 'import ' in content_lower and ('def ' in content_lower or 'class ' in content_lower):
+            return 'python'
+        if ('function' in content_lower or 'const ' in content_lower) and ('=>' in content or 'export' in content_lower):
+            return 'javascript'
+        if '<?php' in content_lower:
+            return 'php'
+        if ('public class' in content_lower or 'import java' in content_lower):
+            return 'java'
+        if ('#include' in content_lower and ('int main' in content_lower or 'cout' in content_lower)):
+            return 'cpp'
+        if 'using system' in content_lower:
+            return 'csharp'
+
+    return 'unknown'
+
+def analyze_code_file(file_path: str, content: str) -> Dict[str, any]:
+    """Analyze a code file and extract useful information"""
+    analysis = {
+        "language": detect_language_from_file(file_path, content),
+        "lines": len(content.split('\n')),
+        "characters": len(content),
+        "functions": [],
+        "classes": [],
+        "imports": [],
+        "complexity": "simple",
+        "patterns": [],
+        "suggestions": []
+    }
+
+    # Language-specific analysis
+    if analysis["language"] == "python":
+        analysis.update(analyze_python_file(content))
+    elif analysis["language"] in ["javascript", "typescript"]:
+        analysis.update(analyze_js_file(content))
+    elif analysis["language"] == "java":
+        analysis.update(analyze_java_file(content))
+
+    # Calculate complexity
+    analysis["complexity"] = calculate_complexity(content, analysis["language"])
+
+    # Generate suggestions
+    analysis["suggestions"] = generate_code_suggestions(analysis)
+
+    return analysis
+
+def analyze_python_file(content: str) -> Dict[str, List[str]]:
+    """Analyze Python file content"""
+    functions = re.findall(r'def\s+(\w+)\s*\(', content)
+    classes = re.findall(r'class\s+(\w+)\s*[:\(]', content)
+    imports = re.findall(r'(?:from\s+[\w.]+\s+import|import\s+[\w.]+)', content)
+
+    return {
+        "functions": functions,
+        "classes": classes,
+        "imports": imports
+    }
+
+def analyze_js_file(content: str) -> Dict[str, List[str]]:
+    """Analyze JavaScript/TypeScript file content"""
+    functions = re.findall(r'(?:function\s+(\w+)|const\s+(\w+)\s*=\s*(?:\([^)]*\)\s*)?=>\s*\{?|(?:async\s+)?(?:function\s+)?(\w+)\s*\([^)]*\)\s*\{)', content)
+    functions = [f for group in functions for f in group if f]  # Flatten and filter
+
+    classes = re.findall(r'class\s+(\w+)', content)
+    imports = re.findall(r'import\s+.*?from\s+[\'"]([^\'"]+)[\'"]', content)
+
+    return {
+        "functions": functions,
+        "classes": classes,
+        "imports": imports
+    }
+
+def analyze_java_file(content: str) -> Dict[str, List[str]]:
+    """Analyze Java file content"""
+    functions = re.findall(r'(?:public|private|protected)?\s*\w+\s+(\w+)\s*\([^)]*\)', content)
+    classes = re.findall(r'class\s+(\w+)', content)
+    imports = re.findall(r'import\s+([^;]+);', content)
+
+    return {
+        "functions": functions,
+        "classes": classes,
+        "imports": imports
+    }
+
+def calculate_complexity(content: str, language: str) -> str:
+    """Calculate code complexity"""
+    lines = len(content.split('\n'))
+    functions = len(re.findall(r'def\s+\w+' if language == 'python' else r'function\s+\w+', content))
+    loops = len(re.findall(r'(for|while|if)\s*\(', content))
+    complexity_score = functions + loops + (lines // 50)
+
+    if complexity_score < 5:
+        return "simple"
+    elif complexity_score < 15:
+        return "moderate"
+    else:
+        return "complex"
+
+def generate_code_suggestions(analysis: Dict[str, any]) -> List[str]:
+    """Generate code improvement suggestions"""
+    suggestions = []
+
+    if analysis["lines"] > 300:
+        suggestions.append("Consider breaking this file into smaller modules")
+
+    if len(analysis["functions"]) > 15:
+        suggestions.append("This file has many functions - consider splitting into multiple files")
+
+    if analysis["complexity"] == "complex":
+        suggestions.append("Consider refactoring for better maintainability")
+
+    if not analysis["classes"] and len(analysis["functions"]) > 5:
+        suggestions.append("Consider organizing functions into classes")
+
+    return suggestions
+
+def analyze_folder_structure(folder_path: str) -> Dict[str, any]:
+    """Analyze project folder structure"""
+    structure = {
+        "total_files": 0,
+        "languages": {},
+        "folders": [],
+        "file_types": {},
+        "largest_files": [],
+        "project_type": "unknown"
+    }
+
+    for root, dirs, files in os.walk(folder_path):
+        # Count folders
+        for dir_name in dirs:
+            structure["folders"].append(os.path.join(root, dir_name))
+
+        # Analyze files
+        for file in files:
+            file_path = os.path.join(root, file)
+            structure["total_files"] += 1
+
+            # Get file size
+            try:
+                size = os.path.getsize(file_path)
+                structure["largest_files"].append((file, size))
+            except:
+                pass
+
+            # Detect language
+            lang = detect_language_from_file(file)
+            structure["languages"][lang] = structure["languages"].get(lang, 0) + 1
+
+            # File type analysis
+            _, ext = os.path.splitext(file.lower())
+            structure["file_types"][ext] = structure["file_types"].get(ext, 0) + 1
+
+    # Sort largest files
+    structure["largest_files"] = sorted(structure["largest_files"], key=lambda x: x[1], reverse=True)[:10]
+
+    # Determine project type
+    if structure["languages"].get("python", 0) > structure["total_files"] * 0.3:
+        structure["project_type"] = "python"
+    elif structure["languages"].get("javascript", 0) > structure["total_files"] * 0.3:
+        structure["project_type"] = "javascript"
+    elif structure["languages"].get("java", 0) > structure["total_files"] * 0.3:
+        structure["project_type"] = "java"
+
+    return structure
 
 def get_db_connection():
     """Create and return Supabase client"""
@@ -74,7 +370,7 @@ generated_files:
             st.error(f"Failed to create database schema: {e}")
             return False
 
-    return True
+        return True
 
 def save_conversation_to_db(session_id, project_title, teams, uploaded_file_name=None, uploaded_file_content=None):
     """Save conversation metadata to database"""
@@ -193,12 +489,273 @@ def load_conversation_from_db(session_id):
         st.error(f"Failed to load conversation: {e}")
         return None
 
-# Page configuration
+# Modern Page Configuration
 st.set_page_config(
-    page_title="AI Discussion Manager",
-    page_icon="🤖",
-    layout="wide"
+    page_title="🚀 AI Code Analyst Pro",
+    page_icon="🚀",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={
+        'Get Help': 'https://github.com/alfredmukasa/alra_mcp_app',
+        'Report a bug': 'https://github.com/alfredmukasa/alra_mcp_app/issues',
+        'About': '''
+        ### 🚀 AI Code Analyst Pro
+        An advanced AI-powered code analysis and project management tool.
+
+        **Features:**
+        - 🔍 Multi-language code analysis
+        - 📁 Project structure insights
+        - 🤖 AI-powered recommendations
+        - 🎨 Modern UI with themes
+        - 📊 Real-time collaboration
+        - 📈 Performance monitoring
+        '''
+    }
 )
+
+# Custom CSS for Modern UI
+def load_css():
+    """Load custom CSS for modern styling"""
+    st.markdown("""
+    <style>
+    /* Modern CSS for AI Code Analyst Pro */
+
+    /* Main container styling */
+    .main-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 15px;
+        margin-bottom: 2rem;
+        text-align: center;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    }
+
+    .main-header h1 {
+        font-size: 3rem;
+        font-weight: 700;
+        margin-bottom: 0.5rem;
+        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+    }
+
+    .main-header p {
+        font-size: 1.2rem;
+        opacity: 0.9;
+        margin: 0;
+    }
+
+    /* Card styling */
+    .modern-card {
+        background: white;
+        border-radius: 15px;
+        padding: 2rem;
+        margin: 1rem 0;
+        box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+        border: 1px solid #e1e5e9;
+        transition: all 0.3s ease;
+    }
+
+    .modern-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 15px 35px rgba(0,0,0,0.15);
+    }
+
+    .modern-card h3 {
+        color: #2c3e50;
+        margin-bottom: 1rem;
+        font-size: 1.5rem;
+    }
+
+    /* Status indicators */
+    .status-success {
+        background: linear-gradient(135deg, #4CAF50, #45a049);
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 25px;
+        font-weight: 600;
+        display: inline-block;
+        margin: 0.5rem 0;
+    }
+
+    .status-error {
+        background: linear-gradient(135deg, #f44336, #d32f2f);
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 25px;
+        font-weight: 600;
+        display: inline-block;
+        margin: 0.5rem 0;
+    }
+
+    .status-warning {
+        background: linear-gradient(135deg, #ff9800, #f57c00);
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 25px;
+        font-weight: 600;
+        display: inline-block;
+        margin: 0.5rem 0;
+    }
+
+    /* Button styling */
+    .modern-button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        padding: 0.75rem 2rem;
+        border-radius: 25px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        text-decoration: none;
+        display: inline-block;
+        margin: 0.5rem;
+    }
+
+    .modern-button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 25px rgba(102, 126, 234, 0.3);
+    }
+
+    /* Progress bar styling */
+    .progress-container {
+        background: #f0f2f5;
+        border-radius: 10px;
+        height: 8px;
+        margin: 1rem 0;
+        overflow: hidden;
+    }
+
+    .progress-bar {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        height: 100%;
+        border-radius: 10px;
+        transition: width 0.3s ease;
+    }
+
+    /* Code analysis cards */
+    .analysis-card {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 15px;
+        margin: 1rem 0;
+        text-align: center;
+    }
+
+    .analysis-card h4 {
+        margin: 0 0 0.5rem 0;
+        font-size: 1.2rem;
+    }
+
+    .analysis-card .metric {
+        font-size: 2rem;
+        font-weight: 700;
+        margin: 0;
+    }
+
+    /* File upload styling */
+    .upload-zone {
+        border: 2px dashed #667eea;
+        border-radius: 15px;
+        padding: 2rem;
+        text-align: center;
+        background: #f8f9ff;
+        transition: all 0.3s ease;
+        margin: 1rem 0;
+    }
+
+    .upload-zone:hover {
+        background: #eef2ff;
+        border-color: #764ba2;
+    }
+
+    /* Sidebar styling */
+    .sidebar-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin-bottom: 1rem;
+        text-align: center;
+    }
+
+    /* Animation for loading states */
+    @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.5; }
+        100% { opacity: 1; }
+    }
+
+    .loading {
+        animation: pulse 1.5s infinite;
+    }
+
+    /* Theme toggle */
+    .theme-toggle {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 1rem 0;
+    }
+
+    .theme-toggle button {
+        background: none;
+        border: 2px solid #667eea;
+        border-radius: 50%;
+        width: 50px;
+        height: 50px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.5rem;
+    }
+
+    .theme-toggle button:hover {
+        background: #667eea;
+        color: white;
+    }
+
+    /* Responsive design */
+    @media (max-width: 768px) {
+        .main-header h1 {
+            font-size: 2rem;
+        }
+
+        .modern-card {
+            padding: 1rem;
+        }
+
+        .main-header {
+            padding: 1rem;
+        }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# Initialize session state
+def initialize_session_state():
+    """Initialize all session state variables"""
+    if 'apis_verified' not in st.session_state:
+        st.session_state.apis_verified = False
+    if 'openai_client' not in st.session_state:
+        st.session_state.openai_client = None
+    if 'supabase_client' not in st.session_state:
+        st.session_state.supabase_client = None
+    if 'theme' not in st.session_state:
+        st.session_state.theme = "light"
+    if 'uploaded_files' not in st.session_state:
+        st.session_state.uploaded_files = []
+    if 'analysis_results' not in st.session_state:
+        st.session_state.analysis_results = {}
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = "dashboard"
+
+# Load CSS and initialize session state
+load_css()
+initialize_session_state()
 
 # Initialize database schema on startup
 if 'db_initialized' not in st.session_state:
@@ -821,9 +1378,399 @@ def generate_all_files(messages, project_title, teams):
     except Exception as e:
         return False, f"❌ Error generating files: {str(e)}"
 
-# Main UI
-st.title("🤖 AI Discussion Manager")
-st.markdown("*Watch multiple OpenAI developer teams collaborate on your project in real-time. Upload documentation or describe your project for comprehensive analysis and planning.*")
+# Modern Main UI
+def render_main_header():
+    """Render the main header with modern styling"""
+    st.markdown("""
+    <div class="main-header">
+        <h1>🚀 AI Code Analyst Pro</h1>
+        <p>Advanced AI-powered code analysis, project insights, and intelligent recommendations</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+def render_api_verification_section():
+    """Render API verification section"""
+    st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+    st.markdown("### 🔑 API Configuration & Verification")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("#### 🤖 OpenAI API")
+        openai_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            placeholder="sk-...",
+            help="Enter your OpenAI API key to enable AI analysis"
+        )
+
+        if openai_key:
+            if st.button("🔍 Verify OpenAI API", key="verify_openai"):
+                with st.spinner("Verifying OpenAI API..."):
+                    verified, message = verify_openai_api_key(openai_key)
+                    if verified:
+                        st.success(message)
+                        st.session_state.openai_client = openai.OpenAI(api_key=openai_key)
+                        st.session_state.openai_verified = True
+                    else:
+                        st.error(message)
+
+        if st.session_state.get('openai_verified', False):
+            st.markdown('<span class="status-success">✅ OpenAI API Connected</span>', unsafe_allow_html=True)
+
+    with col2:
+        st.markdown("#### 🗄️ Supabase Database")
+        supabase_url = st.text_input(
+            "Supabase URL",
+            placeholder="https://your-project-id.supabase.co",
+            help="Enter your Supabase project URL"
+        )
+        supabase_key = st.text_input(
+            "Supabase Key",
+            type="password",
+            placeholder="your-supabase-anon-key",
+            help="Enter your Supabase anon key"
+        )
+
+        if supabase_url and supabase_key:
+            if st.button("🔍 Verify Supabase", key="verify_supabase"):
+                with st.spinner("Verifying Supabase connection..."):
+                    verified, message = verify_supabase_credentials(supabase_url, supabase_key)
+                    if verified:
+                        st.success(message)
+                        st.session_state.supabase_client = create_client(supabase_url, supabase_key)
+                        st.session_state.supabase_verified = True
+                    else:
+                        st.error(message)
+
+        if st.session_state.get('supabase_verified', False):
+            st.markdown('<span class="status-success">✅ Supabase Connected</span>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def render_navigation():
+    """Render modern navigation"""
+    st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+    st.markdown("### 🧭 Navigation")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    pages = {
+        "🏠 Dashboard": "dashboard",
+        "📁 File Analysis": "analysis",
+        "📊 Project Insights": "insights",
+        "⚙️ Settings": "settings"
+    }
+
+    for i, (label, page) in enumerate(pages.items()):
+        if i == 0 and st.button(label, key=f"nav_{page}", type="primary"):
+            st.session_state.current_page = page
+        elif st.button(label, key=f"nav_{page}"):
+            st.session_state.current_page = page
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def render_file_upload_section():
+    """Render enhanced file upload section"""
+    st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+    st.markdown("### 📁 File & Folder Analysis")
+
+    tab1, tab2, tab3 = st.tabs(["📄 Single Files", "📂 Folder Upload", "🔗 URL Import"])
+
+    with tab1:
+        uploaded_files = st.file_uploader(
+            "Upload code files for analysis",
+            accept_multiple_files=True,
+            type=['py', 'js', 'ts', 'java', 'cpp', 'c', 'cs', 'php', 'rb', 'go', 'html', 'css', 'md', 'txt']
+        )
+
+        if uploaded_files and st.button("🔍 Analyze Files", key="analyze_files"):
+            with st.spinner("Analyzing files..."):
+                analyze_uploaded_files(uploaded_files)
+
+    with tab2:
+        st.markdown('<div class="upload-zone">', unsafe_allow_html=True)
+        st.markdown("### 📂 Drag & Drop Folder")
+        st.markdown("Support for ZIP files containing project folders")
+        uploaded_zip = st.file_uploader("Upload ZIP file", type=['zip'])
+
+        if uploaded_zip and st.button("📦 Extract & Analyze", key="analyze_zip"):
+            with st.spinner("Extracting and analyzing folder..."):
+                analyze_zip_folder(uploaded_zip)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with tab3:
+        repo_url = st.text_input("GitHub Repository URL", placeholder="https://github.com/user/repo")
+        if repo_url and st.button("📥 Clone & Analyze", key="analyze_repo"):
+            with st.spinner("Cloning and analyzing repository..."):
+                analyze_github_repo(repo_url)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def analyze_zip_folder(zip_file):
+    """Analyze ZIP folder structure"""
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+
+            # Analyze the extracted folder
+            structure = analyze_folder_structure(temp_dir)
+
+            st.success("✅ Folder extracted and analyzed!")
+            display_folder_analysis(structure)
+
+    except Exception as e:
+        st.error(f"❌ Error analyzing ZIP folder: {str(e)}")
+
+def analyze_github_repo(repo_url):
+    """Analyze GitHub repository"""
+    st.info("🚧 GitHub repository analysis coming soon!")
+    # TODO: Implement GitHub API integration for repository analysis
+
+def display_folder_analysis(structure):
+    """Display folder structure analysis"""
+    st.markdown("### 📂 Folder Analysis Results")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.markdown(f"""
+        <div class="analysis-card">
+            <h4>📁 Total Files</h4>
+            <div class="metric">{structure['total_files']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        st.markdown(f"""
+        <div class="analysis-card">
+            <h4>🗂️ Folders</h4>
+            <div class="metric">{len(structure['folders'])}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col3:
+        st.markdown(f"""
+        <div class="analysis-card">
+            <h4>🗣️ Languages</h4>
+            <div class="metric">{len(structure['languages'])}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col4:
+        st.markdown(f"""
+        <div class="analysis-card">
+            <h4>📋 Types</h4>
+            <div class="metric">{len(structure['file_types'])}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Language breakdown
+    if structure['languages']:
+        st.markdown("#### 🗣️ Language Distribution")
+        lang_data = {k: v for k, v in structure['languages'].items() if k != 'unknown'}
+        if lang_data:
+            st.bar_chart(lang_data)
+
+    # Largest files
+    if structure['largest_files']:
+        st.markdown("#### 📊 Largest Files")
+        for file_name, size in structure['largest_files'][:5]:
+            st.write(f"📄 {file_name}: {size:,} bytes")
+
+    # Project type detection
+    if structure['project_type'] != 'unknown':
+        st.success(f"🎯 Detected project type: **{structure['project_type'].title()}**")
+
+def analyze_uploaded_files(files):
+    """Analyze uploaded files"""
+    results = {}
+    progress_bar = st.progress(0)
+
+    for i, file in enumerate(files):
+        file_content = file.read().decode('utf-8')
+        file_path = file.name
+
+        # Analyze the file
+        analysis = analyze_code_file(file_path, file_content)
+        results[file_path] = analysis
+
+        # Update progress
+        progress_bar.progress((i + 1) / len(files))
+
+    st.session_state.analysis_results = results
+    display_analysis_results(results)
+
+def display_analysis_results(results):
+    """Display analysis results in modern cards"""
+    if not results:
+        return
+
+    st.markdown("### 📊 Analysis Results")
+
+    # Summary metrics
+    total_files = len(results)
+    languages = {}
+    total_lines = 0
+
+    for file_path, analysis in results.items():
+        lang = analysis['language']
+        languages[lang] = languages.get(lang, 0) + 1
+        total_lines += analysis['lines']
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.markdown(f"""
+        <div class="analysis-card">
+            <h4>📄 Files</h4>
+            <div class="metric">{total_files}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        st.markdown(f"""
+        <div class="analysis-card">
+            <h4>📝 Lines</h4>
+            <div class="metric">{total_lines:,}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col3:
+        st.markdown(f"""
+        <div class="analysis-card">
+            <h4>🗣️ Languages</h4>
+            <div class="metric">{len(languages)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col4:
+        st.markdown(f"""
+        <div class="analysis-card">
+            <h4>🔧 Functions</h4>
+            <div class="metric">{sum(len(a.get('functions', [])) for a in results.values())}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Detailed file analysis
+    for file_path, analysis in results.items():
+        with st.expander(f"📄 {file_path}", expanded=False):
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric("Language", analysis['language'].title())
+                st.metric("Lines", analysis['lines'])
+                st.metric("Complexity", analysis['complexity'].title())
+
+            with col2:
+                st.metric("Functions", len(analysis.get('functions', [])))
+                st.metric("Classes", len(analysis.get('classes', [])))
+                st.metric("Imports", len(analysis.get('imports', [])))
+
+            with col3:
+                st.metric("Characters", f"{analysis['characters']:,}")
+
+            # Suggestions
+            if analysis.get('suggestions'):
+                st.markdown("#### 💡 Suggestions")
+                for suggestion in analysis['suggestions']:
+                    st.info(f"• {suggestion}")
+
+# Main Application Flow
+def main():
+    """Main application function"""
+    render_main_header()
+
+    # Check if APIs are verified
+    apis_ready = st.session_state.get('openai_verified', False) and st.session_state.get('supabase_verified', False)
+
+    if not apis_ready:
+        render_api_verification_section()
+        st.warning("⚠️ Please verify your API credentials above to unlock all features")
+        return
+
+    # Main navigation and content
+    render_navigation()
+
+    current_page = st.session_state.current_page
+
+    if current_page == "dashboard":
+        render_dashboard()
+    elif current_page == "analysis":
+        render_analysis_page()
+    elif current_page == "insights":
+        render_insights_page()
+    elif current_page == "settings":
+        render_settings_page()
+
+def render_dashboard():
+    """Render dashboard page"""
+    st.markdown("### 📈 Dashboard Overview")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+        st.markdown("#### 📊 Analysis Summary")
+        if st.session_state.analysis_results:
+            st.metric("Files Analyzed", len(st.session_state.analysis_results))
+        else:
+            st.info("No files analyzed yet")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col2:
+        st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+        st.markdown("#### 🤖 AI Status")
+        st.success("✅ OpenAI Connected")
+        st.success("✅ Supabase Connected")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col3:
+        st.markdown('<div class="modern-card">', unsafe_allow_html=True)
+        st.markdown("#### 📁 Recent Activity")
+        st.info("Upload files to get started")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    render_file_upload_section()
+
+def render_analysis_page():
+    """Render analysis page"""
+    st.markdown("### 🔍 Code Analysis")
+
+    if not st.session_state.analysis_results:
+        st.info("📄 Upload files to see analysis results")
+        render_file_upload_section()
+    else:
+        display_analysis_results(st.session_state.analysis_results)
+
+def render_insights_page():
+    """Render insights page"""
+    st.markdown("### 📊 Project Insights")
+    st.info("🚧 Insights feature coming soon!")
+
+def render_settings_page():
+    """Render settings page"""
+    st.markdown("### ⚙️ Settings")
+
+    # Theme selection
+    st.markdown("#### 🎨 Theme")
+    theme_options = ["light", "dark", "modern"]
+    selected_theme = st.selectbox("Choose theme", theme_options, index=theme_options.index(st.session_state.theme))
+    if selected_theme != st.session_state.theme:
+        st.session_state.theme = selected_theme
+        st.success(f"✅ Theme changed to {selected_theme}")
+
+    # API settings
+    st.markdown("#### 🔑 API Settings")
+    if st.button("🔄 Re-verify APIs", key="reverify"):
+        st.session_state.openai_verified = False
+        st.session_state.supabase_verified = False
+        st.success("API verification reset. Please re-verify your credentials.")
+
+# Run the main application
+if __name__ == "__main__":
+    main()
 
 # Sidebar configuration
 with st.sidebar:
