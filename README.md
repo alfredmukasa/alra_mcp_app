@@ -214,7 +214,22 @@ After discussion completion:
 ```bash
 # Test database connection
 python setup_database.py
+
+# Test with comprehensive table check
+python test_db_connection.py
 ```
+
+#### Database Setup Steps:
+1. **Create Supabase Project**: Go to https://supabase.com and create a new project
+2. **Get Credentials**: Copy your project URL and anon key from Settings → API
+3. **Update .env**: Add your credentials to the `.env` file
+4. **Create Tables**: Run the SQL commands provided above in your Supabase SQL Editor
+5. **Test Connection**: Run `python test_db_connection.py` to verify everything works
+
+#### Common Database Errors:
+- **"Table does not exist"**: Run the SQL commands to create tables in Supabase
+- **"Invalid credentials"**: Check your SUPABASE_URL and SUPABASE_KEY in .env
+- **"Network error"**: Check your internet connection and Supabase project status
 
 ### OpenAI API Issues
 ```bash
