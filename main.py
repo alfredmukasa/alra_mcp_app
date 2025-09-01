@@ -1455,18 +1455,22 @@ def render_navigation():
 
     col1, col2, col3, col4 = st.columns(4)
 
-    pages = {
-        "🏠 Dashboard": "dashboard",
-        "📁 File Analysis": "analysis",
-        "📊 Project Insights": "insights",
-        "⚙️ Settings": "settings"
-    }
+    pages = [
+        ("🏠 Dashboard", "dashboard", col1),
+        ("📁 File Analysis", "analysis", col2),
+        ("📊 Project Insights", "insights", col3),
+        ("⚙️ Settings", "settings", col4)
+    ]
 
-    for i, (label, page) in enumerate(pages.items()):
-        if i == 0 and st.button(label, key=f"nav_{page}", type="primary"):
-            st.session_state.current_page = page
-        elif st.button(label, key=f"nav_{page}"):
-            st.session_state.current_page = page
+    for label, page, col in pages:
+        with col:
+            # Use unique keys and handle navigation
+            button_key = f"nav_{page}_{hash(label)}"
+            is_current_page = st.session_state.current_page == page
+
+            if st.button(label, key=button_key, type="primary" if is_current_page else "secondary"):
+                st.session_state.current_page = page
+                st.rerun()
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1820,7 +1824,7 @@ with st.sidebar:
             title = conv.get('project_title', f"Conversation {conv.get('id', 'Unknown')}")
             created_date = conv.get('created_at', 'Unknown').strftime('%Y-%m-%d %H:%M') if conv.get('created_at') else 'Unknown'
 
-            if st.button(f"📄 {title[:30]}... ({created_date})", key=f"hist_{conv.get('id')}"):
+            if st.button(f"📄 {title[:30]}... ({created_date})", key=f"hist_{conv.get('id')}_{hash(title)}"):
                 # Load this conversation
                 full_conv = load_conversation_from_db(conv.get('session_id'))
                 if full_conv:
@@ -2181,10 +2185,10 @@ with col2:
                             key=f"download_{file_name}_{hash(file_content)}"
                         )
                     with col_btn2:
-                        if st.button("👁️ Full View", key=f"fullview_{file_name}"):
-                            st.text_area("Full Content:", file_content, height=400, key=f"textarea_{file_name}")
+                        if st.button("👁️ Full View", key=f"fullview_{file_name}_{hash(file_content[:100])}"):
+                            st.text_area("Full Content:", file_content, height=400, key=f"textarea_{file_name}_{hash(file_content[:100])}")
                     with col_btn3:
-                        if st.button("📋 Copy", key=f"copy_{file_name}"):
+                        if st.button("📋 Copy", key=f"copy_{file_name}_{hash(file_content[:100])}"):
                             st.code(file_content, language="markdown")
                             st.success("Content copied to clipboard area above!")
 
