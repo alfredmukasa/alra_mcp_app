@@ -1991,7 +1991,7 @@ with col1:
     display_conversation()
 
     # Auto discussion
-    if st.session_state.discussion_active and st.session_state.teams:
+    if st.session_state.discussion_active and st.session_state.teams and st.session_state.messages:
         ai_count = len([m for m in st.session_state.messages if m["model"]])
         if ai_count < max_rounds * len(st.session_state.teams):
             last_model = st.session_state.messages[-1].get("model", "")
