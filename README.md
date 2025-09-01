@@ -227,6 +227,31 @@ python test_connection.py your_openai_api_key
 - **Database connection failed**: Check Supabase URL and key are correct
 - **File upload errors**: Ensure files are `.md` or `.txt` format and under size limits
 
+### Browser Extension Conflicts
+If you see this error in your browser console:
+```
+Unchecked runtime.lastError: The message port closed before a response was received.
+```
+
+**This is NOT an application error** - it's caused by browser extensions.
+
+#### Quick Solutions:
+1. **Try Incognito/Private Mode** - Opens app without extensions
+2. **Disable Ad Blockers** - uBlock Origin, AdBlock Plus often cause this
+3. **Use Different Browser** - Firefox, Safari, or Edge instead of Chrome
+4. **Disable Privacy Extensions** - Ghostery, Privacy Badger may interfere
+
+#### For Chrome Users:
+- Go to `chrome://extensions/`
+- Try disabling extensions one by one
+- Look for extensions that modify web requests
+
+#### For Firefox Users:
+- Go to `about:addons`
+- Disable extensions that block network requests
+
+**Note:** This error doesn't affect your app's functionality - it's purely a browser extension conflict.
+
 ## 🤝 Contributing
 
 1. Fork the repository
