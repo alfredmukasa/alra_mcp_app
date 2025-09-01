@@ -13,7 +13,7 @@ An intelligent collaborative development tool that simulates multiple AI develop
 - **Environment Configuration**: Secure OpenAI key management via environment variables
 
 ### Advanced Features
-- **MySQL Database Integration**: Persistent storage for conversations and generated files
+- **Supabase Database Integration**: Persistent storage for conversations and generated files
 - **Automatic Documentation Generation**: Creates project specifications, implementation guides, and Cursor IDE prompts
 - **Manager Oversight**: Project Manager role coordinates team efforts and provides executive summaries
 - **Enhanced File Management**: File filtering, preview, download, and review capabilities
@@ -25,7 +25,7 @@ An intelligent collaborative development tool that simulates multiple AI develop
 
 ### Prerequisites
 - Python 3.8+
-- MySQL Server 8.0+
+- Supabase account and project
 - OpenAI API Key
 
 ### Installation
@@ -40,12 +40,9 @@ pip install -r requirements.txt
 2. **Environment Configuration**:
 Create a `.env` file in the project root:
 ```env
-# Database Configuration
-DB_HOST=localhost
-DB_USER=root
-DB_PASSWORD=your_mysql_password
-DB_NAME=ai_discussion_manager
-DB_PORT=3306
+# Supabase Configuration
+SUPABASE_URL=https://your-project-id.supabase.co
+SUPABASE_KEY=your-supabase-anon-key
 
 # OpenAI Configuration
 OPENAI_API_KEY=your_openai_api_key_here
@@ -87,10 +84,8 @@ ai-discussion-manager/
 
 ### Database Configuration
 The application uses the following environment variables:
-- `DB_HOST`: MySQL server host (default: localhost)
-- `DB_USER`: MySQL username (default: root)
-- `DB_PASSWORD`: MySQL password
-- `DB_NAME`: Database name (default: ai_discussion_manager)
+- `SUPABASE_URL`: Your Supabase project URL
+- `SUPABASE_KEY`: Your Supabase anon/public key
 
 ## 👥 AI Teams
 
@@ -229,7 +224,7 @@ python test_connection.py your_openai_api_key
 
 ### Common Issues
 - **"Module 'openai' has no attribute 'OpenAI'"**: Upgrade OpenAI library with `pip install --upgrade openai`
-- **Database connection failed**: Check MySQL server is running and credentials are correct
+- **Database connection failed**: Check Supabase URL and key are correct
 - **File upload errors**: Ensure files are `.md` or `.txt` format and under size limits
 
 ## 🤝 Contributing
@@ -245,13 +240,13 @@ python test_connection.py your_openai_api_key
 ### Python Packages
 - streamlit>=1.28.0
 - openai>=1.0.0
-- mysql-connector-python>=8.0.0
-- pymysql>=1.0.0
+- supabase>=2.3.0
+- psycopg2-binary>=2.9.0
 - python-dotenv>=1.0.0
 
 ### System Requirements
 - Python 3.8+
-- MySQL 8.0+
+- Supabase account and project
 - 4GB RAM minimum
 - Stable internet connection
 

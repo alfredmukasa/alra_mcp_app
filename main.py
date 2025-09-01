@@ -2,8 +2,7 @@ import streamlit as st
 import openai
 import time
 from datetime import datetime
-import mysql.connector
-from mysql.connector import Error
+from supabase import create_client, Client
 import os
 import json
 from dotenv import load_dotenv
@@ -11,173 +10,142 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-# Database Configuration
-DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'user': os.getenv('DB_USER', 'root'),
-    'password': os.getenv('DB_PASSWORD', ''),
-    'database': os.getenv('DB_NAME', 'ai_discussion_manager')
-}
+# Supabase Configuration
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 
 def get_db_connection():
-    """Create and return database connection"""
+    """Create and return Supabase client"""
     try:
-        connection = mysql.connector.connect(**DB_CONFIG)
-        return connection
-    except Error as e:
-        st.error(f"Database connection failed: {e}")
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            st.error("Supabase configuration missing. Please check SUPABASE_URL and SUPABASE_KEY environment variables.")
+            return None
+        supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        return supabase
+    except Exception as e:
+        st.error(f"Supabase connection failed: {e}")
         return None
 
 def create_database_schema():
     """Create database tables if they don't exist"""
-    connection = None
-    try:
-        # Connect without database first
-        temp_config = DB_CONFIG.copy()
-        temp_config.pop('database', None)
-        connection = mysql.connector.connect(**temp_config)
-        cursor = connection.cursor()
-
-        # Create database if it doesn't exist
-        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {DB_CONFIG['database']}")
-        cursor.execute(f"USE {DB_CONFIG['database']}")
-
-        # Create conversations table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                session_id VARCHAR(255) NOT NULL,
-                project_title VARCHAR(500),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                status ENUM('active', 'completed', 'cancelled') DEFAULT 'active',
-                teams TEXT,
-                uploaded_file_name VARCHAR(500),
-                uploaded_file_content LONGTEXT
-            )
-        """)
-
-        # Create messages table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                conversation_id INT,
-                role ENUM('user', 'assistant') NOT NULL,
-                content LONGTEXT NOT NULL,
-                model VARCHAR(100),
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-            )
-        """)
-
-        # Create generated_files table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS generated_files (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                conversation_id INT,
-                file_type ENUM('markdown', 'prompt', 'cursor_guide') NOT NULL,
-                file_name VARCHAR(500) NOT NULL,
-                file_content LONGTEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-            )
-        """)
-
-        connection.commit()
-        return True
-
-    except Error as e:
-        st.error(f"Database schema creation failed: {e}")
+    supabase = get_db_connection()
+    if not supabase:
         return False
-    finally:
-        if connection and connection.is_connected():
-            cursor.close()
-            connection.close()
+
+    try:
+        # Create conversations table
+        supabase.table('conversations').select('*').limit(1).execute()  # Test if table exists
+    except:
+        # Table doesn't exist, create it
+        try:
+            # Note: In Supabase, tables are typically created via the dashboard or migrations
+            # This is a placeholder - actual table creation should be done in Supabase dashboard
+            st.warning("Tables need to be created in Supabase dashboard. Please create the following tables:")
+            st.code("""
+conversations:
+- id: integer (primary key, auto-increment)
+- session_id: text
+- project_title: text
+- created_at: timestamp with time zone (default: now())
+- updated_at: timestamp with time zone (default: now())
+- status: text (check constraint: 'active', 'completed', 'cancelled')
+- teams: text
+- uploaded_file_name: text
+- uploaded_file_content: text
+
+messages:
+- id: integer (primary key, auto-increment)
+- conversation_id: integer (foreign key to conversations.id)
+- role: text (check constraint: 'user', 'assistant')
+- content: text
+- model: text
+- timestamp: timestamp with time zone (default: now())
+
+generated_files:
+- id: integer (primary key, auto-increment)
+- conversation_id: integer (foreign key to conversations.id)
+- file_type: text (check constraint: 'markdown', 'prompt', 'cursor_guide')
+- file_name: text
+- file_content: text
+- created_at: timestamp with time zone (default: now())
+            """)
+            return False
+        except Exception as e:
+            st.error(f"Failed to create database schema: {e}")
+            return False
+
+    return True
 
 def save_conversation_to_db(session_id, project_title, teams, uploaded_file_name=None, uploaded_file_content=None):
     """Save conversation metadata to database"""
-    connection = get_db_connection()
-    if not connection:
+    supabase = get_db_connection()
+    if not supabase:
         return None
 
     try:
-        cursor = connection.cursor()
-        cursor.execute("""
-            INSERT INTO conversations (session_id, project_title, teams, uploaded_file_name, uploaded_file_content)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (session_id, project_title, json.dumps(teams) if teams else None, uploaded_file_name, uploaded_file_content))
-        conversation_id = cursor.lastrowid
-        connection.commit()
-        return conversation_id
-    except Error as e:
+        data = {
+            'session_id': session_id,
+            'project_title': project_title,
+            'teams': json.dumps(teams) if teams else None,
+            'uploaded_file_name': uploaded_file_name,
+            'uploaded_file_content': uploaded_file_content
+        }
+        result = supabase.table('conversations').insert(data).execute()
+        if result.data:
+            return result.data[0]['id']
+        return None
+    except Exception as e:
         st.error(f"Failed to save conversation: {e}")
         return None
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
 
 def save_message_to_db(conversation_id, role, content, model=None):
     """Save individual message to database"""
-    connection = get_db_connection()
-    if not connection:
+    supabase = get_db_connection()
+    if not supabase:
         return False
 
     try:
-        cursor = connection.cursor()
-        cursor.execute("""
-            INSERT INTO messages (conversation_id, role, content, model)
-            VALUES (%s, %s, %s, %s)
-        """, (conversation_id, role, content, model))
-        connection.commit()
-        return True
-    except Error as e:
+        data = {
+            'conversation_id': conversation_id,
+            'role': role,
+            'content': content,
+            'model': model
+        }
+        result = supabase.table('messages').insert(data).execute()
+        return len(result.data) > 0
+    except Exception as e:
         st.error(f"Failed to save message: {e}")
         return False
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
 
 def save_generated_file_to_db(conversation_id, file_type, file_name, file_content):
     """Save generated file to database"""
-    connection = get_db_connection()
-    if not connection:
+    supabase = get_db_connection()
+    if not supabase:
         return False
 
     try:
-        cursor = connection.cursor()
-        cursor.execute("""
-            INSERT INTO generated_files (conversation_id, file_type, file_name, file_content)
-            VALUES (%s, %s, %s, %s)
-        """, (conversation_id, file_type, file_name, file_content))
-        connection.commit()
-        return True
-    except Error as e:
+        data = {
+            'conversation_id': conversation_id,
+            'file_type': file_type,
+            'file_name': file_name,
+            'file_content': file_content
+        }
+        result = supabase.table('generated_files').insert(data).execute()
+        return len(result.data) > 0
+    except Exception as e:
         st.error(f"Failed to save generated file: {e}")
         return False
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
 
 def load_conversation_history():
     """Load conversation history list from database"""
-    connection = get_db_connection()
-    if not connection:
+    supabase = get_db_connection()
+    if not supabase:
         return None
 
     try:
-        cursor = connection.cursor(dictionary=True)
+        result = supabase.table('conversations').select('id, session_id, project_title, created_at, status, teams').order('created_at', desc=True).execute()
 
-        # Get all conversations ordered by creation date
-        cursor.execute("""
-            SELECT id, session_id, project_title, created_at, status, teams
-            FROM conversations
-            ORDER BY created_at DESC
-        """)
-
-        conversations = cursor.fetchall()
+        conversations = result.data
 
         # Convert teams JSON string back to list
         for conv in conversations:
@@ -189,49 +157,31 @@ def load_conversation_history():
 
         return conversations
 
-    except Error as e:
+    except Exception as e:
         st.error(f"Failed to load conversation history: {e}")
         return None
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
 
 def load_conversation_from_db(session_id):
     """Load conversation data from database"""
-    connection = get_db_connection()
-    if not connection:
+    supabase = get_db_connection()
+    if not supabase:
         return None
 
     try:
-        cursor = connection.cursor(dictionary=True)
-
         # Get conversation
-        cursor.execute("SELECT * FROM conversations WHERE session_id = %s", (session_id,))
-        conversation = cursor.fetchone()
-
-        if not conversation:
+        conv_result = supabase.table('conversations').select('*').eq('session_id', session_id).execute()
+        if not conv_result.data:
             return None
 
-        # Get messages
-        cursor.execute("""
-            SELECT role, content, model, timestamp
-            FROM messages
-            WHERE conversation_id = %s
-            ORDER BY timestamp ASC
-        """, (conversation['id'],))
+        conversation = conv_result.data[0]
 
-        messages = cursor.fetchall()
+        # Get messages
+        msg_result = supabase.table('messages').select('role, content, model, timestamp').eq('conversation_id', conversation['id']).order('timestamp').execute()
+        messages = msg_result.data
 
         # Get generated files
-        cursor.execute("""
-            SELECT file_type, file_name, file_content, created_at
-            FROM generated_files
-            WHERE conversation_id = %s
-            ORDER BY created_at DESC
-        """, (conversation['id'],))
-
-        files = cursor.fetchall()
+        files_result = supabase.table('generated_files').select('file_type, file_name, file_content, created_at').eq('conversation_id', conversation['id']).order('created_at', desc=True).execute()
+        files = files_result.data
 
         return {
             'conversation': conversation,
@@ -239,13 +189,9 @@ def load_conversation_from_db(session_id):
             'files': files
         }
 
-    except Error as e:
+    except Exception as e:
         st.error(f"Failed to load conversation: {e}")
         return None
-    finally:
-        if connection.is_connected():
-            cursor.close()
-            connection.close()
 
 # Page configuration
 st.set_page_config(
